@@ -21,7 +21,7 @@ run-dump: $(BUILD)/dump
 	$(BUILD)/dump -o out.flv rtmp://shgbit.xyz/live/1
 
 run-parser: $(BUILD)/parser
-	@$(BUILD)/parser -V out.flv
+	@$(BUILD)/parser out.flv
 
 # alias
 run: run-parser

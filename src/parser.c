@@ -71,9 +71,9 @@ typedef struct {
 } avc_decoder_configuration_record_t;
 
 typedef struct {
-  uint32_t nalu_len;
-  void *data;
-} avc_nalu_t;
+  uint32_t size; // tag->data_size - 9
+  void *data; // nalu(s): nalu1-len nalu1 data nalu2-len nalu2 ... naluN-len naluN
+} avc_nalus_t;
 
 static FILE *infile = NULL;
 static flv_header_t flv_header;
@@ -81,12 +81,16 @@ static flv_tag_t *flv_tag_list_head;
 static flv_tag_t *flv_tag_list_current;
 static uint32_t flv_tag_list_size;
 
+void die(char *);
+void generate_h264_file();
+
 void flv_read_header();
 flv_tag_t *flv_read_tag();
 video_tag_t *read_video_tag(flv_tag_t *flv_tag);
 
 void push_tag(flv_tag_t *);
 size_t get_tag_count();
+size_t get_video_tag_count();
 
 size_t fread_UI8(uint8_t *, FILE *file);
 size_t fread_UI16(uint16_t *, FILE *file);
@@ -137,6 +141,7 @@ int main(int argc, char *argv[]) {
   }
 
   printf("flv tag count: %lu\n", get_tag_count());
+  printf("flv video tag count: %lu\n", get_video_tag_count());
 
   // video tags
   int i = 0;
@@ -145,15 +150,64 @@ int main(int argc, char *argv[]) {
     do {
       if (TAGTYPE_VIDEODATA == current->tag_type) {
         ++i;
-        RTMP_Log(RTMP_LOGINFO, "%s, t: %d, data size: %d", flv_tag_types[current->tag_type], current->timestamp, current->data_size);
+        RTMP_Log(RTMP_LOGDEBUG, "%s, t: %d, data size: %d", flv_tag_types[current->tag_type], current->timestamp, current->data_size);
       }
-    } while ((current = (flv_tag_t *) current->next) != NULL && i < 10);
+    } while ((current = (flv_tag_t *) current->next) != NULL && i < 5);
   }
+
+  // mv video tag to h264 file
+  generate_h264_file();
 
   RTMP_Log(RTMP_LOGDEBUG, "the end.");
   release();
 
   return 0;
+}
+
+void generate_h264_file() {
+  // open outfile
+  FILE *outfile = fopen("out.h264", "wb");
+  static const byte startcode[] = {0x00, 0x00, 0x00, 0x01};
+
+  // write pps/sps
+  flv_tag_t *current = flv_tag_list_head;
+  assert(current);
+
+  do {
+    if (TAGTYPE_VIDEODATA == current->tag_type) {
+      video_tag_t *video_tag = (video_tag_t *) current->data;
+      avc_video_packet_t *packet = (avc_video_packet_t *) video_tag->data;
+      if (AVC_SEQUENCE_HEADER == packet->avc_packet_type) {
+        avc_decoder_configuration_record_t *record = (avc_decoder_configuration_record_t *) packet->data;
+
+        RTMP_LogHex(RTMP_LOGINFO, record->sps, record->sequenceParameterSetLength);
+        fwrite(&startcode, sizeof(startcode), 1, outfile);
+        fwrite(record->sps, record->sequenceParameterSetLength, 1, outfile);
+
+        RTMP_LogHex(RTMP_LOGINFO, record->pps, record->pictureParameterSetLength);
+        fwrite(&startcode, sizeof(startcode), 1, outfile);
+        fwrite(record->pps, record->pictureParameterSetLength, 1, outfile);
+      } else if (AVC_NALU == packet->avc_packet_type) {
+        avc_nalus_t *nalus = (avc_nalus_t *) packet->data;
+
+        // AVCC to AnnexB
+        uint32_t offset = 0;
+        uint32_t nalu_len = 0;
+        while (offset < (nalus->size - 4)) {
+          memcpy(&nalu_len, nalus->data + offset, 4);
+          nalu_len = ntohl(nalu_len);
+          printf(".");
+          fwrite(&startcode, sizeof(startcode), 1, outfile);
+          fwrite(nalus->data + offset + 4, nalu_len, 1, outfile);
+
+          offset += nalu_len + 4;
+        }
+      }
+    }
+  } while ((current = (flv_tag_t *) current->next) != NULL);
+  printf("\n");
+
+  fclose(outfile);
 }
 
 void die(char *message) {
@@ -299,24 +353,21 @@ video_tag_t *read_video_tag(flv_tag_t *flv_tag) {
     record->pps = malloc(record->pictureParameterSetLength);
     if (record->pictureParameterSetLength != fread(record->pps, 1, record->pictureParameterSetLength, infile)) return NULL;
     RTMP_LogHex(RTMP_LOGDEBUG, record->pps, record->pictureParameterSetLength);
+
+    packet->data = record;
   } else if (AVC_NALU == packet->avc_packet_type) {
-    // 文档中SVCPacketType==1时: one or more NALUs
-    // 这里仅考虑了一个NALU的情况
-    // TODO: more NALUs
-    avc_nalu_t *nalu = NULL;
-    nalu = malloc(sizeof(avc_nalu_t));
-
-    if (4 != fread_UI32(&(nalu->nalu_len), infile)) return NULL;
-
-    nalu->data = malloc((size_t) flv_tag->data_size - 9);
-    fread(nalu->data, 1, (size_t) flv_tag->data_size - 9, infile);
-
-    RTMP_Log(RTMP_LOGDEBUG, "      AVC nalu length: %i", nalu->nalu_len);
+    avc_nalus_t *nalus = NULL;
+    nalus = malloc(sizeof(avc_nalus_t));
+    nalus->size = flv_tag->data_size - 5;
+    nalus->data = malloc((size_t) nalus->size);
+    fread(nalus->data, 1, (size_t) nalus->size, infile);
+    packet->data = nalus;
   } else {
     packet->data = malloc((size_t) flv_tag->data_size - 5);
     fread(packet->data, 1, (size_t) flv_tag->data_size - 5, infile);
   }
 
+  tag->data = packet;
   return tag;
 }
 
@@ -341,6 +392,17 @@ size_t get_tag_count() {
   if (current != NULL) {
     do {
       ++size;
+    } while ((current = (flv_tag_t *) current->next) != NULL);
+  }
+  return size;
+}
+
+size_t get_video_tag_count() {
+  size_t size = 0;
+  flv_tag_t *current = flv_tag_list_head;
+  if (current != NULL) {
+    do {
+      if (TAGTYPE_VIDEODATA == current->tag_type) ++size;
     } while ((current = (flv_tag_t *) current->next) != NULL);
   }
   return size;
