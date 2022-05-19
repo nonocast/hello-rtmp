@@ -36,6 +36,8 @@ typedef struct flv_header flv_header_t;
 
 typedef struct {
   struct flv_tag *next;
+  size_t offset; // 文件偏移量
+
   uint8_t tag_type;
   uint32_t data_size;
   uint32_t timestamp;
@@ -43,6 +45,10 @@ typedef struct {
   uint32_t stream_id;
   void *data;
 } flv_tag_t;
+
+typedef struct {
+  void *data;
+} data_tag_t;
 
 typedef struct {
   uint8_t frame_type;
@@ -87,6 +93,7 @@ void generate_h264_file();
 void flv_read_header();
 flv_tag_t *flv_read_tag();
 video_tag_t *read_video_tag(flv_tag_t *flv_tag);
+data_tag_t *read_data_tag(flv_tag_t *);
 
 void push_tag(flv_tag_t *);
 size_t get_tag_count();
@@ -125,7 +132,6 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  RTMP_Log(RTMP_LOGDEBUG, "input: %s", argv[1]);
   infile = fopen(argv[optind], "r");
   if (!infile) {
     usage(argv[0]);
@@ -148,15 +154,22 @@ int main(int argc, char *argv[]) {
   flv_tag_t *current = flv_tag_list_head;
   if (current != NULL) {
     do {
-      if (TAGTYPE_VIDEODATA == current->tag_type) {
+      if (TAGTYPE_SCRIPTDATAOBJECT == current->tag_type) {
+        byte *amf_buffer = ((data_tag_t *) current->data)->data;
+        size_t amf_len = current->data_size;
+
+        RTMP_Log(RTMP_LOGINFO, "%s, t: %d, offset: 0x%08lx, data size: %d", flv_tag_types[current->tag_type], current->timestamp, current->offset, current->data_size);
+        RTMP_LogHexString(RTMP_LOGINFO, amf_buffer, amf_len);
+
+      } else if (TAGTYPE_VIDEODATA == current->tag_type) {
         ++i;
-        RTMP_Log(RTMP_LOGDEBUG, "%s, t: %d, data size: %d", flv_tag_types[current->tag_type], current->timestamp, current->data_size);
+        RTMP_Log(RTMP_LOGDEBUG, "%s, t: %d, offset: 0x%08lx, data size: %d", flv_tag_types[current->tag_type], current->timestamp, current->offset, current->data_size);
       }
     } while ((current = (flv_tag_t *) current->next) != NULL && i < 5);
   }
 
   // mv video tag to h264 file
-  generate_h264_file();
+  // generate_h264_file();
 
   RTMP_Log(RTMP_LOGDEBUG, "the end.");
   release();
@@ -231,6 +244,9 @@ void flv_read_header() {
 }
 
 flv_tag_t *flv_read_tag() {
+  // flv header size
+  static size_t offset = 9;
+
   static uint32_t i = 0;
   RTMP_Log(RTMP_LOGDEBUG2, "---------------------- flv_read_tag.begin: %d", ++i);
 
@@ -241,6 +257,7 @@ flv_tag_t *flv_read_tag() {
   tag = malloc(sizeof(flv_tag_t));
 
   if (4 != fread_UI32(&prev_tag_size, infile)) return NULL;
+
   if (1 != fread_UI8(&(tag->tag_type), infile)) return NULL;
   if (3 != fread_UI24(&(tag->data_size), infile)) return NULL;
   if (3 != fread_UI24(&(tag->timestamp), infile)) return NULL;
@@ -253,14 +270,21 @@ flv_tag_t *flv_read_tag() {
   RTMP_Log(RTMP_LOGDEBUG, "  Timestamp etxended: %d", tag->timestamp_ext);
   RTMP_Log(RTMP_LOGDEBUG, "  StreamID: %d", tag->stream_id);
 
+  tag->offset = offset + 4;
+  offset += 15 + tag->data_size;
+
   switch (tag->tag_type) {
-  case TAGTYPE_AUDIODATA:
   case TAGTYPE_SCRIPTDATAOBJECT:
+    tag->data = (void *) read_data_tag(tag);
+    break;
+
+  case TAGTYPE_AUDIODATA:
     tag->data = malloc((size_t) tag->data_size);
     if (tag->data_size != fread(tag->data, 1, (size_t) tag->data_size, infile)) {
       return NULL;
     }
     break;
+
   case TAGTYPE_VIDEODATA:
     tag->data = (void *) read_video_tag(tag);
     break;
@@ -268,6 +292,22 @@ flv_tag_t *flv_read_tag() {
     die("unknown tag type");
     break;
   }
+
+  return tag;
+}
+
+data_tag_t *read_data_tag(flv_tag_t *flv_tag) {
+  // TODO: READ AMF0
+
+  data_tag_t *tag = NULL;
+  tag = malloc(sizeof(data_tag_t));
+
+  tag->data = malloc((size_t) flv_tag->data_size);
+  if (flv_tag->data_size != fread(tag->data, 1, (size_t) flv_tag->data_size, infile)) {
+    return NULL;
+  }
+
+  RTMP_LogHexString(RTMP_LOGDEBUG2, tag->data, flv_tag->data_size);
 
   return tag;
 }
