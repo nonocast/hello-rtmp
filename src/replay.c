@@ -1,4 +1,3 @@
-#include <assert.h>
 #include <librtmp/amf.h>
 #include <librtmp/log.h>
 #include <librtmp/rtmp.h>
@@ -25,11 +24,11 @@ void open_flv();
 void open_rtmp();
 void close_rtmp();
 void send_metadata();
-void die();
 void get_metadata_tag();
 void get_video_tags();
 flv_tag_t *read_tag();
 void read_ui24(uint32_t *, void *);
+int die();
 static int DumpMetaData(AMFObject *);
 static void sigIntHandler(int sig);
 
@@ -39,50 +38,47 @@ RTMP *rtmp;
 flv_tag_t **video_tags;
 size_t video_tag_size;
 flv_tag_t *metadata_tag;
+byte message[10 * 1024 * 1024];
 
 int main(int argc, char *argv[]) {
+
   open_flv();
   open_rtmp();
 
   send_metadata();
 
-  byte buffer[1024 * 1024 * 20];
+  int i = 0;
   flv_tag_t *current;
 
-  int i = 0;
   while (!RTMP_ctrlC) {
     current = video_tags[i];
     fseek(infile, current->offset, SEEK_SET);
-    fread(buffer, 1, current->size, infile);
-    int count = RTMP_Write(rtmp, (char *) buffer, current->size);
-    RTMP_Log(RTMP_LOGINFO, "send video tag: %d", count);
+    fread(message, 1, current->size, infile);
+    int count = RTMP_Write(rtmp, (char *) message, current->size);
+    RTMP_Log(RTMP_LOGINFO, "send video tag (#%d): %d", i, count);
 
-    usleep(20 * 1000);
-
-    if (i + 1 == video_tag_size) {
-      i = 0;
-      RTMP_Log(RTMP_LOGINFO, "************************");
-    } else {
-      ++i;
+    if (++i && (i = i % video_tag_size)) { // loop video_tags
     }
+    usleep(1000 / 25 * 1000); // fps: 25
   }
 
-  close_rtmp();
-
-  return 0;
+  return die();
 }
 
-void send_metadata() {
-  byte buffer[1024];
-  fseek(infile, metadata_tag->offset, SEEK_SET);
-  fread(buffer, 1, metadata_tag->size, infile);
-  int count = RTMP_Write(rtmp, (char *) buffer, metadata_tag->size);
+static void sigIntHandler(int sig) {
+  RTMP_ctrlC = TRUE;
+  signal(SIGINT, SIG_IGN);
+}
 
-  RTMP_Log(RTMP_LOGINFO, "send metadata: %d", count);
+void open_flv() {
+  RTMP_LogSetLevel(RTMP_LOGINFO);
+  infile = fopen("out.flv", "rb");
+  get_metadata_tag();
+  get_video_tags();
 }
 
 void open_rtmp() {
-  char *url = "rtmp://live.nonocast.cn/app/nonocast";
+  char *url = "rtmp://shgbit.xyz/app/1";
 
   rtmp = RTMP_Alloc();
   RTMP_Init(rtmp);
@@ -106,33 +102,21 @@ void open_rtmp() {
   signal(SIGINT, sigIntHandler);
 }
 
-void close_rtmp() {
+int die() {
   RTMP_Close(rtmp);
   RTMP_Free(rtmp);
-  rtmp = NULL;
-}
-
-void open_flv() {
-  RTMP_LogSetLevel(RTMP_LOGINFO);
-  // RTMP_LogSetLevel(RTMP_LOGALL);
-  // infile = fopen("out.flv", "rb");
-  infile = fopen("/Users/nonocast/Desktop/clip.flv", "rb");
-  get_metadata_tag();
-  get_video_tags();
-
-  // check
-  flv_tag_t *tag = video_tags[0];
-  RTMP_Log(RTMP_LOGDEBUG, "%s", flv_tag_types[tag->type]);
-  RTMP_LogHex(RTMP_LOGDEBUG, tag->head, sizeof(tag->head));
-  RTMP_Log(RTMP_LOGDEBUG, "  tag offset: 0x%08x, tag size: %lu", tag->offset, tag->size);
-  RTMP_Log(RTMP_LOGDEBUG, "  data offset: 0x%08x, data size: %lu", tag->data_offset, tag->data_size);
-
-  RTMP_Log(RTMP_LOGINFO, "video tags: %lu", video_tag_size);
-}
-
-void die() {
   fclose(infile);
-  exit(1);
+  exit(0);
+  return 0;
+}
+
+void send_metadata() {
+  byte buffer[1024];
+  fseek(infile, metadata_tag->offset, SEEK_SET);
+  fread(buffer, 1, metadata_tag->size, infile);
+  int count = RTMP_Write(rtmp, (char *) buffer, metadata_tag->size);
+
+  RTMP_Log(RTMP_LOGINFO, "send metadata: %d", count);
 }
 
 void get_metadata_tag() {
@@ -156,7 +140,6 @@ void get_metadata_tag() {
 
   AMFObject obj;
   AMF_Decode(&obj, obj_buffer, tag->data_size, false);
-  RTMP_Log(RTMP_LOGDEBUG, "  ---------------------------------------");
   DumpMetaData(&obj);
 
   metadata_tag = tag;
@@ -237,15 +220,8 @@ static int DumpMetaData(AMFObject *obj) {
       snprintf(str, 255, "INVALID TYPE 0x%02x", (unsigned char) prop->p_type);
     }
     if (str[0] && prop->p_name.av_len) {
-      RTMP_Log(RTMP_LOGINFO, "  %-22.*s%s", prop->p_name.av_len, prop->p_name.av_val, str);
+      RTMP_Log(RTMP_LOGDEBUG, "  %-22.*s%s", prop->p_name.av_len, prop->p_name.av_val, str);
     }
   }
   return FALSE;
-}
-
-static void sigIntHandler(int sig) {
-  RTMP_ctrlC = TRUE;
-  // RTMP_LogPrintf("Caught signal: %d, cleaning up, just a second...\n", sig);
-  // ignore all these signals now and let the connection close
-  signal(SIGINT, SIG_IGN);
 }
