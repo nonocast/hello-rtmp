@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <librtmp/amf.h>
 #include <librtmp/log.h>
 #include <librtmp/rtmp.h>
@@ -24,6 +25,8 @@ void open_flv();
 void open_rtmp();
 void close_rtmp();
 void send_metadata();
+void send_metadata_packet();
+void send_video_tag(uint32_t);
 void get_metadata_tag();
 void get_video_tags();
 flv_tag_t *read_tag();
@@ -41,24 +44,17 @@ flv_tag_t *metadata_tag;
 byte message[10 * 1024 * 1024];
 
 int main(int argc, char *argv[]) {
-
   open_flv();
   open_rtmp();
 
+  // send_metadata_packet();
   send_metadata();
 
-  int i = 0;
-  flv_tag_t *current;
-
   while (!RTMP_ctrlC) {
-    current = video_tags[i];
-    fseek(infile, current->offset, SEEK_SET);
-    fread(message, 1, current->size, infile);
-    int count = RTMP_Write(rtmp, (char *) message, current->size);
-    RTMP_Log(RTMP_LOGINFO, "send video tag (#%d): %d", i, count);
+    static int i = 0;
+    send_video_tag(i++);
 
-    if (++i && (i = i % video_tag_size)) { // loop video_tags
-    }
+    i = i % video_tag_size; // loop video_tags
     usleep(1000 / 25 * 1000); // fps: 25
   }
 
@@ -110,6 +106,28 @@ int die() {
   return 0;
 }
 
+// 需要在flv metadata body前增加AMF0 String '@setDataFrame' (16 bytes)
+void send_metadata_packet() {
+  RTMPPacket packet;
+  RTMPPacket_Reset(&packet);
+
+  packet.m_packetType = RTMP_PACKET_TYPE_INFO;
+  packet.m_headerType = RTMP_PACKET_SIZE_LARGE;
+  packet.m_nInfoField2 = rtmp->m_stream_id;
+  packet.m_nChannel = 4;
+  packet.m_nBodySize += metadata_tag->data_size + 16;
+  RTMPPacket_Alloc(&packet, packet.m_nBodySize);
+
+  AVal str = AVC("@setDataFrame");
+  assert(AMF_EncodeString(packet.m_body, packet.m_body + packet.m_nBodySize, &str) != NULL);
+  fseek(infile, metadata_tag->data_offset, SEEK_SET);
+  fread(packet.m_body + 16, 1, metadata_tag->data_size, infile);
+
+  RTMP_LogHexString(RTMP_LOGINFO, (uint8_t *) packet.m_body, packet.m_nBodySize);
+  RTMP_SendPacket(rtmp, &packet, false);
+  RTMPPacket_Free(&packet);
+}
+
 void send_metadata() {
   byte buffer[1024];
   fseek(infile, metadata_tag->offset, SEEK_SET);
@@ -117,6 +135,15 @@ void send_metadata() {
   int count = RTMP_Write(rtmp, (char *) buffer, metadata_tag->size);
 
   RTMP_Log(RTMP_LOGINFO, "send metadata: %d", count);
+}
+
+void send_video_tag(uint32_t index) {
+  flv_tag_t *current;
+  current = video_tags[index];
+  fseek(infile, current->offset, SEEK_SET);
+  fread(message, 1, current->size, infile);
+  int count = RTMP_Write(rtmp, (char *) message, current->size);
+  RTMP_Log(RTMP_LOGINFO, "send video tag (#%d): %d", index, count);
 }
 
 void get_metadata_tag() {
